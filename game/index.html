@@ -71,9 +71,17 @@
   #score-value { color: var(--muted); }
   #score-value b { color: var(--ink); font-weight: 600; }
   #round-score { display: block; margin-top: 4px; font-size: 12px; color: var(--muted); }
+  #round-pips { display: flex; gap: 5px; margin-top: 7px; }
+  #round-pips .pip { width: 9px; height: 9px; border-radius: 50%; background: var(--hairline); }
+  #round-pips .pip.player { background: var(--accent); }
+  #round-pips .pip.bots { background: var(--danger); }
   #timer-wrap { text-align: center; }
   #timer-value { font-size: 30px; letter-spacing: .04em; }
   #timer-value.urgent { color: var(--danger); }
+  #fuse-wrap { width: 150px; height: 5px; margin: 6px auto 0; background: var(--hairline); border-radius: 3px; overflow: hidden; }
+  #fuse-fill { height: 100%; width: 100%; background: var(--danger); }
+  #fuse-fill.urgent { background: var(--danger); animation: fuseblink .45s steps(2) infinite; }
+  @keyframes fuseblink { 50% { opacity: .35; } }
   #objective-value { display: block; margin-top: 4px; font-size: 12px; color: var(--accent); }
   #money-wrap { text-align: right; }
   #money-value { font-size: 20px; color: var(--accent); }
@@ -87,6 +95,8 @@
   .killfeed-line b { color: var(--ink); }
 
   #ammo { position: fixed; right: 32px; bottom: 24px; text-align: right; }
+  #reload-wrap { width: 150px; height: 5px; margin: 8px 0 0 auto; background: var(--hairline); border-radius: 3px; overflow: hidden; }
+  #reload-fill { height: 100%; width: 0; background: var(--accent); }
   #ammo-mag { font-family: var(--font-readout); font-size: 56px; line-height: 1; letter-spacing: -.03em; }
   #ammo-reserve { font-family: var(--font-readout); font-size: 16px; color: var(--muted); }
   #ammo.empty #ammo-mag { color: var(--danger); }
@@ -95,6 +105,8 @@
   #grenade-value { display: block; margin-top: 2px; font-family: var(--font-readout); font-size: 12px; color: var(--muted); }
 
   #health-wrap { position: fixed; left: 32px; bottom: 24px; width: 220px; }
+  #health-wrap.critical #health-value { color: var(--danger); animation: healthpulse 1s ease-in-out infinite; }
+  @keyframes healthpulse { 50% { opacity: .55; } }
   #health-row { display: flex; align-items: baseline; gap: 8px; }
   #health-value { font-family: var(--font-readout); font-size: 40px; line-height: 1; }
   #armor-value { font-size: 13px; color: var(--accent); }
@@ -172,9 +184,11 @@
     <div class="side">
       <span id="score-value">DEF <b>0</b> — <b>0</b> DRF</span>
       <span id="round-score">Round 1 / 9 · first to 5</span>
+      <span id="round-pips"></span>
     </div>
     <div id="timer-wrap">
       <div id="timer-value">1:40</div>
+      <div id="fuse-wrap" class="hidden"><div id="fuse-fill"></div></div>
       <span id="objective-value">Hold the yard</span>
     </div>
     <div class="side" id="money-wrap">
@@ -194,6 +208,7 @@
     <span id="ammo-mag">12</span><span id="ammo-reserve">/ 48</span>
     <span id="weapon-name">Tide-9 · Pistol</span>
     <span id="grenade-value">HE 0 · Fog 0</span>
+    <div id="reload-wrap" class="hidden"><div id="reload-fill"></div></div>
   </div>
 
   <div id="banner" class="hidden">
@@ -215,7 +230,7 @@
     <ul class="keys">
       <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move · <kbd>Shift</kbd> Walk · <kbd>Ctrl</kbd> Crouch · <kbd>Space</kbd> Jump</li>
       <li><kbd>Mouse</kbd> Look · <kbd>Click</kbd> Fire · <kbd>R</kbd> Reload</li>
-      <li><kbd>1</kbd>–<kbd>5</kbd> Weapons · <kbd>6</kbd> Throw HE · <kbd>7</kbd> Throw Fog smoke</li>
+      <li><kbd>1</kbd>–<kbd>6</kbd> Weapons · <kbd>7</kbd> Throw HE · <kbd>8</kbd> Throw Fog smoke</li>
       <li><kbd>E</kbd> Defuse the charge · <kbd>B</kbd> Buy menu (buy phase)</li>
     </ul>
   </section>

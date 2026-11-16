@@ -21,6 +21,10 @@ export function createState() {
     kills: 0,
     deaths: 0,
     roundKills: 0,
+    // Consecutive rounds lost: the loss bonus grows with it, up to ×4.
+    lossStreak: 0,
+    // Who won each round so far: 'player' or 'bots', one entry per round.
+    roundHistory: [],
     winner: null,
     matchWinner: null,
     roundReason: '',

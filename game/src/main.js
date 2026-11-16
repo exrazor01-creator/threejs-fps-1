@@ -12,7 +12,7 @@ import { createInput } from './input.js';
 import { createPlayer, updatePlayer, eyePosition, eyeForward, isMoving } from './player.js';
 import {
   WEAPONS, GRENADES, createWeaponState, currentSpread, damageAt,
-  canFire, consumeShot, startReload, updateReload,
+  canFire, consumeShot, startReload, updateReload, recoverWeapon,
   createGrenades, throwGrenade, updateGrenades,
 } from './weapons.js';
 import { createBots, startRound, updateBots, killBot, reassignPlanter } from './bots.js';
@@ -145,6 +145,8 @@ function startMatch() {
   state.matchWinner = null;
   state.hasKit = false;
   state.kevlar = false;
+  state.lossStreak = 0;
+  state.roundHistory = [];
   state.grenades.he = 0;
   state.grenades.smoke = 0;
   weapon.owned = new Set(['tide9']);
@@ -256,21 +258,31 @@ function endRound(winner, reason) {
   state.phase = 'roundEnd';
   state.winner = winner;
   state.roundReason = reason;
+  state.roundHistory.push(winner);
   roundEndTimer = 3.5;
   if (winner === 'player') {
     state.playerRounds += 1;
+    state.lossStreak = 0;
     state.money += 3000;
     audio.roundWin();
     hud.showBanner('Round held', `${reason} · +$3,000`, 3400);
   } else {
     state.botRounds += 1;
-    state.money += 1400;
+    // Loss bonus grows with consecutive lost rounds, like the economy of
+    // the games this one is styled after: $1,400, then $1,900, $2,400,
+    // capped at $2,900, so a losing run can still buy back in.
+    state.lossStreak += 1;
+    const bonus = 1400 + 500 * Math.min(state.lossStreak - 1, 3);
+    state.money += bonus;
     audio.roundLose();
-    hud.showBanner('Round lost', `${reason} · +$1,400`, 3400);
+    const bonusNote = state.lossStreak > 1 ? ` (loss bonus ×${state.lossStreak})` : '';
+    hud.showBanner('Round lost', `${reason} · +$${bonus.toLocaleString('en-US')}${bonusNote}`, 3400);
   }
   hud.setScore(state.playerRounds, state.botRounds, state.round);
+  hud.setRoundHistory(state.roundHistory);
   hud.setMoney(state.money);
   hud.setProgress(null, null);
+  hud.setFuse(null);
   input.exitLock();
 }
 
@@ -384,7 +396,7 @@ function playerShoot(now) {
     return;
   }
   const moving = isMoving(player);
-  const spread = currentSpread(def, weapon, moving, player.state.crouched, !player.state.onGround);
+  const spread = currentSpread(def, weapon, moving, player.state.crouched, !player.state.onGround, now);
   consumeShot(weapon, def, now);
   for (let i = 0; i < def.pellets; i++) firePellet(def, spread);
   effects.muzzle(camera);
@@ -506,6 +518,7 @@ function refreshHud() {
   hud.setHealth(player.state.health, player.state.armor);
   hud.setMoney(state.money);
   hud.setScore(state.playerRounds, state.botRounds, state.round);
+  hud.setRoundHistory(state.roundHistory);
   // During the buy phase the Drifters have not deployed yet: show the full
   // squad coming, not the zero the sim counts while they are hidden.
   hud.setBotsAlive(state.phase === 'buy' ? bots.length : aliveBots().length, bots.length);
@@ -545,6 +558,7 @@ function step(dt) {
   // Live round.
   state.timer -= dt;
   hud.setTimer(state.plantDone ? state.fuseLeft : state.timer);
+  hud.setFuse(state.plantDone ? state.fuseLeft : null, state.fuseTime);
 
   // Player.
   updatePlayer(player, input, dt);
@@ -553,23 +567,27 @@ function step(dt) {
     const def = WEAPONS[weapon.current];
     if (startReload(weapon, def, elapsed)) audio.reload();
   }
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 6; i++) {
     if (keys.has(`Digit${i}`)) {
       const id = Object.keys(WEAPONS)[i - 1];
       if (weapon.owned.has(id) && weapon.current !== id) {
         weapon.current = id;
         weapon.reloading = false;
+        weapon.burstLeft = 0;
         refreshHud();
       }
     }
   }
-  if (pressed('Digit6')) throwPlayerGrenade('he');
-  if (pressed('Digit7')) throwPlayerGrenade('smoke');
-  updateReload(weapon, WEAPONS[weapon.current], elapsed);
+  if (pressed('Digit7')) throwPlayerGrenade('he');
+  if (pressed('Digit8')) throwPlayerGrenade('smoke');
+  const reloadDef = WEAPONS[weapon.current];
+  if (updateReload(weapon, reloadDef, elapsed)) hud.setReload(null);
+  else if (weapon.reloading) {
+    hud.setReload(1 - (weapon.reloadEnd - elapsed) / reloadDef.reloadTime);
+  }
   if (input.state.firing && player.state.alive) playerShoot(elapsed);
-  weapon.bloom = Math.max(0, weapon.bloom - dt * 0.09);
-  weapon.recoilPitch = Math.max(0, weapon.recoilPitch - dt * 0.12);
-  weapon.recoilYaw *= Math.max(0, 1 - dt * 8);
+  // Recoil and bloom settle; a still, crouched shooter recovers fastest.
+  recoverWeapon(weapon, dt, isMoving(player), player.state.crouched);
 
   // Grenades.
   updateGrenades(grens, dt, world.colliders);
@@ -589,6 +607,7 @@ function step(dt) {
     plantDone: state.plantDone,
     plantSite: state.plantSite,
     sites: world.sites,
+    routes: world.routes,
     lastShotAt,
     lastShotPos,
     events: botEvents,
@@ -611,7 +630,7 @@ function step(dt) {
 
   // Crosshair follows the current spread.
   const def = WEAPONS[weapon.current];
-  const spread = currentSpread(def, weapon, isMoving(player), player.state.crouched, !player.state.onGround);
+  const spread = currentSpread(def, weapon, isMoving(player), player.state.crouched, !player.state.onGround, elapsed);
   hud.setCrosshairSpread(4 + spread * 900);
   lastKeys = new Set(input.state.keys);
 }
@@ -738,6 +757,7 @@ function stageShot() {
       hud.setObjective('Defuse the charge at Evap Pans');
     }
     hud.setTimer(state.plantDone ? state.fuseLeft : state.timer);
+    hud.setFuse(state.plantDone ? state.fuseLeft : null, state.fuseTime);
     refreshHud();
   }
   render();

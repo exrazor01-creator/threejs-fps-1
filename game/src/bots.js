@@ -1,9 +1,20 @@
 // The Drifters: four attackers who push a site, plant a charge, and guard
-// it. One bot carries the charge (the planter); the others walk their routes
-// and hold angles. A bot that sees the defender stops, strafes and fires in
-// bursts; a bot that hears a shot turns toward it. If the planter dies, the
-// nearest living bot picks the charge up and goes to plant. After the plant
-// they fall back to hold spots around the charge and defend it.
+// it. One bot carries the charge (the planter); the others walk their
+// routes and hold angles. The squad works as a squad:
+//  - A bot that sees the defender calls it out: every Drifter turns toward
+//    the contact, and a nearby support walks over to investigate the last
+//    known position.
+//  - A bot that hears a shot investigates the sound instead of staring at
+//    the wall it came through.
+//  - One support is the flanker: it pushes the far site, then crosses the
+//    ridge to the real site from the other side, so a defender holding one
+//    angle gets caught between two.
+//  - If the push stalls and the clock runs down with no plant started, the
+//    squad rotates: the planter and the supports re-plan to the other site
+//    instead of walking into the same held angle.
+//  - After the plant they fall back to hold spots around the charge and
+//    defend it. If the planter dies, the nearest living bot picks the
+//    charge up and goes to plant.
 import * as THREE from 'three';
 import { hasLineOfSight, moveCircle } from './physics.js';
 import { WORLD_COLORS } from './palette.js';
@@ -11,6 +22,10 @@ import { WORLD_COLORS } from './palette.js';
 const BOT_NAMES = ['Rook', 'Tern', 'Skua', 'Plover'];
 const BOT_SPEED = 3.1;
 const PLANT_TIME = 5;
+// The clock reading at which a stalled push rotates to the other site.
+const ROTATE_AT = 40;
+// How far a heard shot pulls a support off its route to investigate.
+const INVESTIGATE_RANGE = 15;
 
 const _eye = new THREE.Vector3();
 const _eyeTarget = new THREE.Vector3();
@@ -91,6 +106,13 @@ export function createBots(scene, world) {
       alertUntil: 0,
       alertPos: new THREE.Vector3(),
       holdSpot: new THREE.Vector3(),
+      flankSpot: new THREE.Vector3(),
+      // Last place the squad knows the defender was, and when.
+      lastSeenPos: new THREE.Vector3(),
+      lastSeenAt: -100,
+      investigateUntil: 0,
+      investigatePos: new THREE.Vector3(),
+      rotated: false,
       // Stuck steering: when a wall stops the walk, sidestep around it.
       stuck: 0,
       side: 0,
@@ -185,7 +207,8 @@ function probeSide(bot, colliders) {
 }
 
 // Pick a hold spot near a site: offset from the site centre by a seeded
-// angle, clamped inside the yard.
+// angle, clamped inside the yard. The spot faces the site's approach from
+// the defender's side, so a holder watches the way in, not the wall.
 function pickHoldSpot(bot, site, random) {
   const angle = random() * Math.PI * 2;
   const r = 3.5 + random() * 2.5;
@@ -196,8 +219,22 @@ function pickHoldSpot(bot, site, random) {
   );
 }
 
+// The flank spot is on the far side of the site from the planter's lane:
+// the flanker arrives there from the other site and watches the plant from
+// the opposite angle.
+function pickFlankSpot(bot, site) {
+  const towardDefender = site.center.x < 0 ? 1 : -1;
+  bot.flankSpot.set(
+    Math.max(-22, Math.min(22, site.center.x + towardDefender * 6)),
+    0,
+    Math.max(-16, Math.min(16, site.center.z - 2)),
+  );
+}
+
 export function startRound(bots, world, random) {
-  // Three bots push one site, one lurks mid and rotates to the plant.
+  // Three bots push one site, one lurks mid and rotates to the plant. The
+  // flanker (bot 2) pushes the other site first, then crosses to the real
+  // site from the far side.
   const mainSite = random() < 0.5 ? 'A' : 'B';
   const otherSite = mainSite === 'A' ? 'B' : 'A';
   const routes = world.routes;
@@ -221,35 +258,69 @@ export function startRound(bots, world, random) {
     bot.burstLeft = 0;
     bot.loseSight = 0;
     bot.alertUntil = 0;
+    bot.investigateUntil = 0;
+    bot.rotated = false;
     bot.mesh.group.visible = true;
     bot.mesh.group.rotation.set(0, 0, 0);
     bot.mesh.group.position.copy(bot.position);
     pickHoldSpot(bot, world.sites[bot.site], random);
+    pickFlankSpot(bot, world.sites[mainSite]);
   }
   bots[0].role = 'planter';
   for (let i = 1; i < bots.length; i++) bots[i].role = 'support';
+  bots[2].role = 'flanker';
+}
+
+// Re-plan one bot to a different site from where it stands: the route list
+// is swapped for the far site's mid route and the walk restarts. The third
+// argument is the update context, which carries the world's routes.
+function rotateToSite(bot, site, ctx) {
+  bot.site = site;
+  bot.route = site === 'A' ? ctx.routes.A_mid : ctx.routes.B_mid;
+  bot.waypoint = 0;
+  bot.state = 'route';
+  bot.stateTime = 0;
+  bot.rotated = true;
+  pickHoldSpot(bot, ctx.sites[site], Math.random);
 }
 
 export function updateBots(bots, dt, ctx) {
   // ctx: { now, playerPos, playerAlive, playerMoving, playerCrouched,
   //   colliders, smokeClouds, roundTimeLeft, plantDone, plantSite, sites,
-  //   lastShotAt, lastShotPos, events }
+  //   routes, lastShotAt, lastShotPos, events }
   const events = ctx.events;
   for (const bot of bots) {
     if (!bot.alive) continue;
     bot.stateTime += dt;
     const playerPos = ctx.playerPos;
 
-    // Hearing: a recent shot turns nearby bots toward the sound.
+    // Hearing: a recent shot turns nearby bots toward the sound, and a
+    // support close enough walks over to check it out.
     if (ctx.lastShotAt > 0 && ctx.now - ctx.lastShotAt < 1.2) {
       const d = bot.position.distanceTo(ctx.lastShotPos);
       if (d < 26 && bot.state === 'route') {
         bot.alertUntil = ctx.now + 1.2;
         bot.alertPos.copy(ctx.lastShotPos);
+        if (bot.role === 'support' && d < INVESTIGATE_RANGE && bot.investigateUntil <= ctx.now) {
+          bot.investigateUntil = ctx.now + 3;
+          bot.investigatePos.copy(ctx.lastShotPos);
+        }
       }
     }
 
     const sees = ctx.playerAlive && canSee(bot, playerPos, ctx.colliders, ctx.smokeClouds);
+    if (sees) {
+      // Squad callout: everyone hears where the contact is.
+      bot.lastSeenPos.copy(playerPos);
+      bot.lastSeenAt = ctx.now;
+      for (const other of bots) {
+        if (other === bot || !other.alive) continue;
+        other.alertUntil = ctx.now + 2;
+        other.alertPos.copy(playerPos);
+        other.lastSeenPos.copy(playerPos);
+        other.lastSeenAt = ctx.now;
+      }
+    }
 
     if (bot.state === 'plant') {
       if (sees) {
@@ -284,8 +355,17 @@ export function updateBots(bots, dt, ctx) {
     } else if (bot.state === 'engage') {
       bot.loseSight += dt;
       if (bot.loseSight > 2.2) {
-        bot.state = ctx.plantDone ? 'hold' : 'route';
-        bot.stateTime = 0;
+        // Lost the defender: fall back to the last place they were seen
+        // before giving up and returning to the route.
+        if (ctx.now - bot.lastSeenAt < 4 && bot.role !== 'planter') {
+          bot.state = 'investigate';
+          bot.stateTime = 0;
+          bot.investigatePos.copy(bot.lastSeenPos);
+          bot.investigateUntil = ctx.now + 3;
+        } else {
+          bot.state = ctx.plantDone ? 'hold' : 'route';
+          bot.stateTime = 0;
+        }
       }
     }
 
@@ -309,10 +389,19 @@ export function updateBots(bots, dt, ctx) {
           bot.nextShot = ctx.now + 0.13;
           fireAtPlayer(bot, ctx, events);
         } else if (bot.burstLeft <= 0 && ctx.now >= bot.burstPause) {
-          bot.burstLeft = 3;
+          bot.burstLeft = 3 + Math.floor(Math.random() * 3);
           bot.nextShot = ctx.now + 0.05;
           bot.burstPause = ctx.now + 1.0;
         }
+      }
+      continue;
+    }
+
+    if (bot.state === 'investigate') {
+      const arrived = moveToward(bot, bot.investigatePos, BOT_SPEED * 1.15, dt, ctx.colliders, ctx.now);
+      if (arrived || ctx.now >= bot.investigateUntil) {
+        bot.state = ctx.plantDone ? 'hold' : 'route';
+        bot.stateTime = 0;
       }
       continue;
     }
@@ -324,11 +413,32 @@ export function updateBots(bots, dt, ctx) {
       continue;
     }
 
+    if (bot.state === 'flank') {
+      const arrived = moveToward(bot, bot.flankSpot, BOT_SPEED, dt, ctx.colliders, ctx.now);
+      if (arrived) {
+        bot.state = 'hold';
+        bot.stateTime = 0;
+        bot.holdSpot.copy(bot.flankSpot);
+      }
+      continue;
+    }
+
     // Route: walk the waypoints. The planter plants on arrival; supports
-    // hold at the site and watch the approaches.
+    // hold at the site and watch the approaches; the flanker crosses to
+    // the real site from the far side.
+    // A stalled push rotates: with the clock under ROTATE_AT and no plant
+    // started, the whole squad re-plans to the other site once per round.
+    if (!ctx.plantDone && !bot.rotated && ctx.roundTimeLeft < ROTATE_AT && bot.stateTime > 12) {
+      const otherSite = bot.site === 'A' ? 'B' : 'A';
+      rotateToSite(bot, otherSite, ctx);
+      continue;
+    }
     const speed = ctx.roundTimeLeft < 25 ? BOT_SPEED * 1.3 : BOT_SPEED;
     if (bot.alertUntil > ctx.now) {
       faceToward(bot, bot.alertPos, dt);
+    } else if (bot.investigateUntil > ctx.now && bot.role === 'support') {
+      const arrived = moveToward(bot, bot.investigatePos, BOT_SPEED * 1.15, dt, ctx.colliders, ctx.now);
+      if (arrived) bot.investigateUntil = 0;
     } else if (bot.waypoint < bot.route.length) {
       const target = bot.route[bot.waypoint];
       const arrived = moveToward(bot, target, speed, dt, ctx.colliders, ctx.now);
@@ -338,6 +448,9 @@ export function updateBots(bots, dt, ctx) {
           bot.state = 'plant';
           bot.stateTime = 0;
           bot.plantProgress = 0;
+        } else if (bot.role === 'flanker' && !ctx.plantDone) {
+          bot.state = 'flank';
+          bot.stateTime = 0;
         } else {
           bot.state = 'hold';
           bot.stateTime = 0;
@@ -348,15 +461,41 @@ export function updateBots(bots, dt, ctx) {
       bot.stateTime = 0;
     }
   }
+
+  // Separation: Drifters never stack on one spot — push apart any pair
+  // closer than a body width, so a single grenade cannot catch the squad.
+  for (let i = 0; i < bots.length; i++) {
+    const a = bots[i];
+    if (!a.alive) continue;
+    for (let j = i + 1; j < bots.length; j++) {
+      const b = bots[j];
+      if (!b.alive) continue;
+      const dx = b.position.x - a.position.x;
+      const dz = b.position.z - a.position.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > 0.0001 && d2 < 1.44) {
+        const d = Math.sqrt(d2);
+        const push = (1.2 - d) / 2;
+        const nx = dx / d;
+        const nz = dz / d;
+        a.position.x -= nx * push;
+        a.position.z -= nz * push;
+        b.position.x += nx * push;
+        b.position.z += nz * push;
+      }
+    }
+  }
 }
 
 function fireAtPlayer(bot, ctx, events) {
   const dist = bot.position.distanceTo(ctx.playerPos);
-  // Base accuracy falls with distance; a moving or standing target is
-  // easier to hit than a crouched still one.
+  // Base accuracy falls with distance; a moving target is easier to hit
+  // than a crouched still one, and a bot that has just rounded a corner
+  // fires its first burst wide.
   let chance = 0.58 - dist * 0.011;
   if (ctx.playerMoving) chance += 0.1;
   if (ctx.playerCrouched) chance -= 0.12;
+  if (bot.stateTime < 0.5) chance -= 0.15;
   chance = Math.max(0.08, Math.min(0.75, chance));
   const hit = Math.random() < chance;
   _muzzle.set(bot.position.x, bot.position.y + 1.35, bot.position.z);

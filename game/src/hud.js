@@ -1,8 +1,15 @@
-// The HUD and the menus: health, armour, ammo, money, timer, round score,
-// bots alive, objective banner, killfeed, hitmarker, damage direction, the
-// buy menu and the start/round/match overlays. The HUD reads state and
-// writes text; it never simulates anything. All element lookups happen once
-// here, so a missing element fails loudly at boot instead of mid-round.
+// The HUD and the menus, redesigned: health, armour, ammo, money, timer,
+// round score with a history of pips, bots alive, objective banner,
+// killfeed, hitmarker, damage direction, the buy menu and the start/round/
+// match overlays. New since the last build:
+//  - round pips under the score: one dot per round played, amber for a
+//    round the defender held, red for one the Drifters took;
+//  - a fuse bar under the timer while a charge is planted, draining with
+//    the fuse so the defuse window reads at a glance;
+//  - a reload bar under the ammunition, filling as the reload finishes.
+// The HUD reads state and writes text; it never simulates anything. All
+// element lookups happen once here, so a missing element fails loudly at
+// boot instead of mid-round.
 import { WEAPONS, GRENADES } from './weapons.js';
 
 function el(id) {
@@ -16,11 +23,16 @@ export function createHud(callbacks) {
   const ammoReserve = el('ammo-reserve');
   const ammoWrap = el('ammo');
   const weaponName = el('weapon-name');
+  const reloadWrap = el('reload-wrap');
+  const reloadFill = el('reload-fill');
   const healthValue = el('health-value');
+  const healthWrap = el('health-wrap');
   const healthBar = el('health-fill');
   const armorValue = el('armor-value');
   const moneyValue = el('money-value');
   const timerValue = el('timer-value');
+  const fuseWrap = el('fuse-wrap');
+  const fuseFill = el('fuse-fill');
   const scoreValue = el('score-value');
   const botsValue = el('bots-value');
   const objectiveValue = el('objective-value');
@@ -44,6 +56,7 @@ export function createHud(callbacks) {
   const matchTitle = el('match-title');
   const matchSub = el('match-sub');
   const roundScore = el('round-score');
+  const roundPips = el('round-pips');
 
   let hitTimer = 0;
   let damageTimer = 0;
@@ -83,14 +96,25 @@ export function createHud(callbacks) {
       ammoReserve.textContent = `/ ${reserve}`;
       ammoWrap.classList.toggle('empty', mag === 0);
       ammoWrap.classList.toggle('reloading', reloading);
+      if (!reloading) reloadWrap.classList.add('hidden');
     },
     setWeapon(name, kind) {
       weaponName.textContent = `${name} · ${kind}`;
+    },
+    // fraction 0..1 while a reload runs, null when it is not.
+    setReload(fraction) {
+      if (fraction == null) {
+        reloadWrap.classList.add('hidden');
+        return;
+      }
+      reloadWrap.classList.remove('hidden');
+      reloadFill.style.width = `${Math.round(Math.max(0, Math.min(1, fraction)) * 100)}%`;
     },
     setHealth(health, armor) {
       healthValue.textContent = Math.max(0, Math.ceil(health));
       healthBar.style.width = `${Math.max(0, health)}%`;
       healthBar.classList.toggle('low', health <= 30);
+      healthWrap.classList.toggle('critical', health <= 30);
       armorValue.textContent = armor > 0 ? `Kevlar ${Math.ceil(armor)}` : '';
     },
     setMoney(money) {
@@ -101,9 +125,28 @@ export function createHud(callbacks) {
       timerValue.textContent = fmtTime(seconds);
       timerValue.classList.toggle('urgent', seconds <= 10);
     },
+    // Fuse bar under the timer: seconds left of the total, null to hide.
+    setFuse(seconds, total) {
+      if (seconds == null) {
+        fuseWrap.classList.add('hidden');
+        return;
+      }
+      fuseWrap.classList.remove('hidden');
+      fuseFill.style.width = `${Math.round(Math.max(0, seconds / total) * 100)}%`;
+      fuseFill.classList.toggle('urgent', seconds <= 10);
+    },
     setScore(playerRounds, botRounds, round) {
       scoreValue.innerHTML = `DEF <b>${playerRounds}</b> — <b>${botRounds}</b> DRF`;
       roundScore.textContent = `Round ${round} / 9 · first to 5`;
+    },
+    // One pip per round played: 'player' amber, 'bots' red.
+    setRoundHistory(results) {
+      while (roundPips.firstChild) roundPips.removeChild(roundPips.firstChild);
+      for (const result of results) {
+        const pip = document.createElement('span');
+        pip.className = `pip ${result}`;
+        roundPips.appendChild(pip);
+      }
     },
     setBotsAlive(alive, total) {
       botsValue.textContent = `Drifters ${alive}/${total}`;
@@ -190,6 +233,8 @@ export function createHud(callbacks) {
       matchPanel.hidden = true;
       banner.classList.add('hidden');
       progressWrap.classList.add('hidden');
+      fuseWrap.classList.add('hidden');
+      reloadWrap.classList.add('hidden');
     },
     update(dt) {
       if (hitTimer > 0) {
